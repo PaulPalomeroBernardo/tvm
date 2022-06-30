@@ -14,25 +14,17 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+"""
+Test the @tvm-bot merge code
+"""
 
 import subprocess
 import json
-import sys
-import pytest
-
 from pathlib import Path
 
-from test_utils import REPO_ROOT
-
-
-class TempGit:
-    def __init__(self, cwd):
-        self.cwd = cwd
-
-    def run(self, *args):
-        proc = subprocess.run(["git"] + list(args), cwd=self.cwd)
-        if proc.returncode != 0:
-            raise RuntimeError(f"git command failed: '{args}'")
+import pytest
+import tvm
+from .test_utils import REPO_ROOT, TempGit
 
 
 SUCCESS_EXPECTED_OUTPUT = """
@@ -45,91 +37,126 @@ Dry run, would have merged with url=pulls/10786/merge and data={
 """.strip()
 
 
-test_data = {
+TEST_DATA = {
     "successful-merge": {
         "number": 10786,
         "filename": "pr10786-merges.json",
         "expected": SUCCESS_EXPECTED_OUTPUT,
+        "comment": "@tvm-bot merge",
+        "user": "abc",
         "detail": "Everything is fine so this PR will merge",
     },
     "no-request": {
         "number": 10786,
         "filename": "pr10786-nottriggered.json",
-        "expected": "No merge requested, exiting",
+        "expected": "Command 'do something else' did not match anything",
+        "comment": "@tvm-bot do something else",
+        "user": "abc",
         "detail": "A PR for which the mergebot runs but no merge is requested",
     },
     "bad-ci": {
         "number": 10786,
         "filename": "pr10786-badci.json",
         "expected": "Cannot merge, these CI jobs are not successful on",
+        "comment": "@tvm-bot merge",
+        "user": "abc",
         "detail": "A PR which failed CI and cannot merge",
     },
     "old-review": {
         "number": 10786,
         "filename": "pr10786-oldreview.json",
         "expected": "Cannot merge, did not find any approving reviews",
+        "comment": "@tvm-bot merge",
+        "user": "abc",
         "detail": "A PR with passing CI and approving reviews on an old commit so it cannot merge",
     },
     "missing-job": {
         "number": 10786,
         "filename": "pr10786-missing-job.json",
         "expected": "Cannot merge, missing expected jobs",
+        "comment": "@tvm-bot merge",
+        "user": "abc",
         "detail": "PR missing an expected CI job and cannot merge",
     },
     "invalid-author": {
         "number": 10786,
         "filename": "pr10786-invalid-author.json",
-        "expected": "No merge requested, exiting",
+        "expected": "Comment is not from from PR author or collaborator, quitting",
+        "comment": "@tvm-bot merge",
+        "user": "not-abc",
         "detail": "Merge requester is not a committer and cannot merge",
     },
     "unauthorized-comment": {
         "number": 11244,
         "filename": "pr11244-unauthorized-comment.json",
-        "expected": "No merge requested, exiting",
+        "expected": "Comment is not from from PR author or collaborator, quitting",
+        "comment": "@tvm-bot merge",
+        "user": "not-abc2",
         "detail": "Check that a merge comment not from a CONTRIBUTOR is rejected",
     },
     "no-review": {
         "number": 11267,
         "filename": "pr11267-no-review.json",
         "expected": "Cannot merge, did not find any approving reviews from users with write access",
+        "comment": "@tvm-bot merge",
+        "user": "abc",
         "detail": "Check that a merge request without any reviews is rejected",
     },
     "changes-requested": {
         "number": 10786,
         "filename": "pr10786-changes-requested.json",
         "expected": "Cannot merge, found [this review]",
-        "detail": "Check that a merge request with a 'Changes Requested' review on HEAD is rejected",
+        "comment": "@tvm-bot merge",
+        "user": "abc",
+        "detail": "Check that a merge request with a 'Changes Requested' review is rejected",
     },
     "co-authors": {
         "number": 10786,
         "filename": "pr10786-co-authors.json",
         "expected": "Co-authored-by: Some One <someone@email.com>",
+        "comment": "@tvm-bot merge",
+        "user": "abc",
         "detail": "Check that a merge request with co-authors generates the correct commit message",
     },
-    "no-recomment": {
+    "rerun-ci": {
         "number": 11442,
-        "filename": "pr11442-no-recomment.json",
-        "expected": "No merge requested, exiting",
-        "detail": "Check that comments after a failed merge don't trigger another merge",
+        "filename": "pr11442-rerun-ci.json",
+        "expected": "Rerunning ci with",
+        "comment": "@tvm-bot rerun",
+        "user": "abc",
+        "detail": "Start a new CI job",
     },
 }
 
 
+@tvm.testing.skip_if_wheel_test
 @pytest.mark.parametrize(
-    ["number", "filename", "expected", "detail"],
-    [tuple(d.values()) for d in test_data.values()],
-    ids=test_data.keys(),
+    ["number", "filename", "expected", "comment", "user", "detail"],
+    [tuple(d.values()) for d in TEST_DATA.values()],
+    ids=TEST_DATA.keys(),
 )
-def test_mergebot(tmpdir_factory, number, filename, expected, detail):
-    mergebot_script = REPO_ROOT / "tests" / "scripts" / "github_mergebot.py"
+def test_mergebot(tmpdir_factory, number, filename, expected, comment, user, detail):
+    """
+    Test the mergebot test cases
+    """
+    mergebot_script = REPO_ROOT / "tests" / "scripts" / "github_tvmbot.py"
     test_json_dir = Path(__file__).resolve().parent / "sample_prs"
 
     git = TempGit(tmpdir_factory.mktemp("tmp_git_dir"))
-    git.run("init")
-    git.run("checkout", "-b", "main")
+    git.run("init", stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+    git.run("checkout", "-b", "main", stderr=subprocess.PIPE, stdout=subprocess.PIPE)
     git.run("remote", "add", "origin", "https://github.com/apache/tvm.git")
     with open(test_json_dir / filename) as f:
         test_data = json.load(f)
+
+    comment = {
+        "body": comment,
+        "id": 123,
+        "user": {
+            "login": user,
+        },
+    }
+    collaborators = []
 
     proc = subprocess.run(
         [
@@ -141,11 +168,19 @@ def test_mergebot(tmpdir_factory, number, filename, expected, detail):
             "https://example.com",
             "--testing-pr-json",
             json.dumps(test_data),
+            "--testing-collaborators-json",
+            json.dumps(collaborators),
+            "--trigger-comment-json",
+            json.dumps(comment),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         encoding="utf-8",
+        env={
+            "TVM_BOT_JENKINS_TOKEN": "123",
+        },
         cwd=git.cwd,
+        check=False,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"Process failed:\nstdout:\n{proc.stdout}\n\nstderr:\n{proc.stderr}")
@@ -155,4 +190,4 @@ def test_mergebot(tmpdir_factory, number, filename, expected, detail):
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__] + sys.argv[1:]))
+    tvm.testing.main()
